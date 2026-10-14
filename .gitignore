@@ -1,7 +1,25 @@
-.idea
-.verification
-__pycache__
-results_support
-GRADIENT_ECA.md
-LICENSE
+# IDE、缓存、检查产生的临时文件
+.idea/
+.verification/
+__pycache__/
+*.py[cod]
+
+# Python 环境
+.venv/
+venv/
+
+# 数据和实验输出
+dataset/
+datasets/
+output/
+output_*/
+
+# 模型权重
+*.pth
+*.pt
+*.ckpt
+
+# Excel 写入工具的依赖和临时文件，保留其源码
+results_support/*
+!results_support/update_results.mjs
 
