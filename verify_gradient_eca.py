@@ -12,12 +12,16 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     baseline = model.ECABlock(16, use_spatial_gradient=False).to(device)
     fusion = model.ECABlock(16, use_spatial_gradient=True).to(device)
-    missing, unexpected = fusion.load_state_dict(baseline.state_dict(), strict=False)
-    assert missing == ["grad_conv.weight"] and not unexpected
+    assert len(baseline.convs) == 3
+    assert len(fusion.convs) == 0 and not hasattr(fusion, "grad_conv")
+    assert list(dict(fusion.named_parameters())) == ["log_tau"]
 
     x = torch.randn(2, 16, 17, 19, device=device, requires_grad=True)
-    torch.testing.assert_close(fusion(x), baseline(x), rtol=0, atol=0)
-    print("PASS: zero-initialised fusion exactly matches original ECA")
+    scores = fusion.spatial_gradient_descriptor(x)
+    expected_att = torch.sigmoid(scores / fusion.log_tau.exp())
+    expected_att = expected_att / (expected_att.mean(dim=1, keepdim=True) + 1e-6)
+    torch.testing.assert_close(fusion(x), x * expected_att)
+    print("PASS: direct gradient-only attention")
 
     constant = torch.ones(1, 16, 9, 11, device=device)
     torch.testing.assert_close(
@@ -26,7 +30,7 @@ def main():
     ramp = torch.arange(11., device=device).view(1, 1, 1, 11).expand(1, 16, 9, 11)
     assert (fusion.spatial_gradient_descriptor(ramp) > 0).all()
     torch.testing.assert_close(
-        fusion.spatial_gradient_descriptor(ramp),
+        fusion.spatial_gradient_descriptor(ramp) * 10,
         fusion.spatial_gradient_descriptor(ramp * 10),
     )
     for height, width in [(1, 1), (1, 7), (7, 1)]:
@@ -34,22 +38,23 @@ def main():
         assert torch.isfinite(result).all()
     print("PASS: constant/edge maps, amplitude scaling, and small spatial sizes")
 
+    mixed = constant.clone()
+    mixed[:, 1] = ramp[:, 1]
+    mixed[:, 2] = ramp[:, 2] * 2
+    weights = (fusion(mixed) / mixed.clamp_min(1e-6))[0, :, 0, -1]
+    assert weights[2] > weights[1] > weights[0]
+    scores.sum().backward(retain_graph=True)
+    assert x.grad is not None and x.grad.abs().sum() > 0
+    x.grad = None
     optimizer = torch.optim.SGD(fusion.parameters(), lr=0.01)
     before_step = fusion(x).detach().clone()
     fusion(x).square().mean().backward()
     assert x.grad is not None and torch.isfinite(x.grad).all()
-    grad = fusion.grad_conv.weight.grad
+    grad = fusion.log_tau.grad
     assert grad is not None and torch.isfinite(grad).all() and grad.abs().sum() > 0
     optimizer.step()
-    assert fusion.grad_conv.weight.detach().abs().sum() > 0
     assert not torch.equal(fusion(x).detach(), before_step)
-    # Isolate the learned gradient contribution from changes in avg parameters.
-    baseline.load_state_dict({
-        name: value for name, value in fusion.state_dict().items()
-        if name != "grad_conv.weight"
-    })
-    assert not torch.equal(fusion(x).detach(), baseline(x).detach())
-    print("PASS: new branch receives gradients, updates, and affects attention")
+    print("PASS: stronger edges receive larger weights; input and temperature receive gradients")
 
     # Exercise the real model without downloading encoder weights.
     original_create_model = model.create_model
@@ -71,8 +76,9 @@ def main():
     blocks = [module for module in network.modules() if isinstance(module, model.ECABlock)]
     for block in blocks:
         assert block.use_spatial_gradient
-        assert block.grad_conv.weight.grad is not None
-        assert torch.isfinite(block.grad_conv.weight.grad).all()
+        assert len(block.convs) == 0 and not hasattr(block, "grad_conv")
+        assert block.log_tau.grad is not None
+        assert torch.isfinite(block.log_tau.grad).all()
     print(f"PASS: full model forward/backward, {len(blocks)} gradient ECA blocks on {device}")
 
 

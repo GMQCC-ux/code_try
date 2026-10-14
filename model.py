@@ -55,11 +55,11 @@ class ECABlock(nn.Module):
                 padding=(self.k_size - 1) // 2,
                 bias=False
             )
-            for _ in self.pool_scales
+            for _ in self.pool_scales if not self.use_spatial_gradient
         ])
 
         if self.use_spatial_gradient:
-            # Fixed spatial derivatives; only grad_conv is learned.
+            # Fixed spatial derivatives directly determine channel scores.
             sobel_x = torch.tensor([
                 [-1., 0., 1.], [-2., 0., 2.], [-1., 0., 1.]
             ]) / 8.0
@@ -68,12 +68,6 @@ class ECABlock(nn.Module):
                 torch.stack([sobel_x, sobel_x.t()]).unsqueeze(1),
                 persistent=False,
             )
-            self.grad_conv = nn.Conv1d(
-                1, 1, self.k_size, padding=(self.k_size - 1) // 2,
-                bias=False,
-            )
-            # Start at the original attention; learn the extra contribution.
-            nn.init.zeros_(self.grad_conv.weight)
 
 
         self.log_tau = nn.Parameter(torch.log(torch.tensor(tau_init)))
@@ -88,11 +82,9 @@ class ECABlock(nn.Module):
         return k + 1 if k % 2 == 0 else k
 
     def spatial_gradient_descriptor(self, x):
-        """Return relative edge strength per channel, shaped [B, C, 1, 1]."""
+        """Return mean absolute spatial-gradient magnitude [B, C, 1, 1]."""
         # Compute in FP32 for half-precision inputs to stabilise normalisation.
         features = x.float() if x.dtype in (torch.float16, torch.bfloat16) else x
-        amplitude = features.abs().mean(dim=(2, 3), keepdim=True)
-        features = features / amplitude.clamp_min(1e-6)
         batch, channels, height, width = features.shape
         features = features.reshape(batch * channels, 1, height, width)
         # Replicate padding avoids artificial edges around constant maps.
@@ -107,24 +99,18 @@ class ECABlock(nn.Module):
 
     def forward(self, x):
 
-        att_sum = 0
-
-
-        for pool_size, conv in zip(self.pool_scales, self.convs):
-            pooled = F.adaptive_avg_pool2d(x, (pool_size, pool_size))
-            pooled = pooled.mean(dim=(2, 3), keepdim=True)  # [B, C, 1, 1]
-            logits = conv(
-                pooled.squeeze(-1).transpose(-1, -2)
-            ).transpose(-1, -2).unsqueeze(-1)
-            att_sum += logits
-        logits = att_sum / len(self.pool_scales)
-
         if self.use_spatial_gradient:
-            gradient = self.spatial_gradient_descriptor(x)
-            grad_logits = self.grad_conv(
-                gradient.squeeze(-1).transpose(-1, -2)
-            ).transpose(-1, -2).unsqueeze(-1)
-            logits = logits + grad_logits
+            logits = self.spatial_gradient_descriptor(x)
+        else:
+            att_sum = 0
+            for pool_size, conv in zip(self.pool_scales, self.convs):
+                pooled = F.adaptive_avg_pool2d(x, (pool_size, pool_size))
+                pooled = pooled.mean(dim=(2, 3), keepdim=True)
+                logits = conv(
+                    pooled.squeeze(-1).transpose(-1, -2)
+                ).transpose(-1, -2).unsqueeze(-1)
+                att_sum += logits
+            logits = att_sum / len(self.pool_scales)
 
 
         tau = torch.exp(self.log_tau)

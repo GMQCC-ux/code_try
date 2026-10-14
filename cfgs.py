@@ -14,7 +14,7 @@ resumed_chkpt = ""
 # Single-iteration, epoch-boundary recovery. Re-run xrun.py after a restart.
 auto_epoch_resume = True
 # A separate directory keeps copied/original experiment results intact.
-output_root = "output_resumable" if auto_epoch_resume else "output"
+output_root = "output_gradient_only" if auto_epoch_resume else "output_gradient_only_legacy"
 resume_state_file = f"{output_root}/resume/latest.pt"
 run_state_file = f"{output_root}/resume/run_state.json"
 
@@ -58,7 +58,7 @@ size = (H, W)
 # =============================
 encoder_name_str = "pvt_v2_b2"
 
-# False: original ECA baseline; True: average + spatial-gradient ECA.
+# False: original ECA baseline; True: direct spatial-gradient-only ECA.
 eca_use_spatial_gradient = True
 
 
